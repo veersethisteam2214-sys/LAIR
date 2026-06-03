@@ -2,7 +2,7 @@
 // This is a placeholder used to verify the GitHub -> Vercel auto-deploy pipeline.
 // The real landing page / scroll-video hero is NOT built yet.
 
-const DEPLOY_MARKER = "v1";
+const DEPLOY_MARKER = "v2";
 
 export default function Home() {
   return (
