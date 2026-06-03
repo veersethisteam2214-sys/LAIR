@@ -20,7 +20,8 @@ import { useEffect, useRef } from "react";
  * only the decorative bounce indicator respects prefers-reduced-motion.
  */
 
-const SCROLL_VH = 500; // height of the scroll track in viewport heights
+const SCROLL_VH = 700; // height of the scroll track in viewport heights
+// Taller track = more scroll distance per video frame = smoother scrubbing.
 const VIDEO_SRC = "/assets/video/lair-hero.mp4";
 const POSTER_SRC = "/assets/images/lair-hero-poster.jpg";
 
