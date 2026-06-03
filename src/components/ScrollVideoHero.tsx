@@ -1,136 +1,169 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
- * ScrollVideoHero
- * ----------------
- * A full-screen video whose timeline is driven by the scroll wheel.
+ * ScrollVideoHero — "scroll to play" model.
  *
- * - The outer <section> is very tall (SCROLL_VH) and acts as the "scroll track".
- * - An inner container is `sticky` so the video stays pinned full-screen while
- *   the user scrolls through that track.
- * - Every animation frame we compute how far we are through the track (0 -> 1)
- *   and map it to `video.currentTime` ( = progress * duration ).
- * - We lerp toward the target time so scrubbing feels smooth, not jumpy.
- * - Near the end, the frame fades to black so it flows into the next section.
- *
- * The video is NEVER autoplayed/looped — scroll is the only thing that moves it.
- * The scrub runs for all users (it's driven by the user's own scroll input);
- * only the decorative bounce indicator respects prefers-reduced-motion.
+ * - Hero is a full-screen (100vh) pinned video at the top of the page.
+ * - The first downward scroll/touch/arrow press TRIGGERS playback (and is
+ *   swallowed so the page doesn't move).
+ * - While the video plays, page scrolling is LOCKED.
+ * - When the video ends, scroll unlocks and the page smoothly auto-advances
+ *   into the section below.
+ * - A progress bar + "Skip" control keep users from feeling trapped.
+ * - prefers-reduced-motion users are NOT locked: they see the poster/first
+ *   frame and scroll normally.
  */
 
-const SCROLL_VH = 700; // height of the scroll track in viewport heights
-// Taller track = more scroll distance per video frame = smoother scrubbing.
 const VIDEO_SRC = "/assets/video/lair-hero.mp4";
 const POSTER_SRC = "/assets/images/lair-hero-poster.jpg";
+
+type Phase = "idle" | "playing" | "done";
 
 export default function ScrollVideoHero() {
   const sectionRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const exitRef = useRef<HTMLDivElement>(null);
-  const hintRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
+  const phaseRef = useRef<Phase>("idle");
+  const [phase, setPhase] = useState<Phase>("idle");
+
+  // Exposed so the CTA buttons can disarm the scroll-lock if clicked.
+  const disarmRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const video = videoRef.current;
     const section = sectionRef.current;
     if (!video || !section) return;
 
-    let duration = 10;
-    let smoothed = 0;
-    let raf = 0;
-    let primed = false;
-
-    const setDuration = () => {
-      if (video.duration && !Number.isNaN(video.duration)) {
-        duration = video.duration;
-      }
+    const setPhaseBoth = (p: Phase) => {
+      phaseRef.current = p;
+      setPhase(p);
     };
 
-    // "Prime" the decode pipeline so seeking paints real frames (esp. Safari).
-    const prime = () => {
-      if (primed) return;
-      primed = true;
+    let safetyTimer = 0;
+
+    const lockScroll = () => {
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+    };
+    const unlockScroll = () => {
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    };
+
+    const removeBlockers = () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("keydown", onKey);
+    };
+
+    // Stop locking but stay in place (used when a CTA is clicked).
+    const disarm = () => {
+      if (phaseRef.current === "done") return;
+      setPhaseBoth("done");
+      window.clearTimeout(safetyTimer);
+      removeBlockers();
+      unlockScroll();
+    };
+    disarmRef.current = disarm;
+
+    // End of intro: unlock and glide into the content below.
+    const goToNext = () => {
+      if (phaseRef.current === "done") return;
+      disarm();
+      const top = section.getBoundingClientRect().bottom + window.scrollY;
+      window.scrollTo({ top, behavior: "smooth" });
+    };
+
+    const startPlay = () => {
+      if (phaseRef.current !== "idle") return;
+      setPhaseBoth("playing");
+      window.scrollTo(0, 0);
+      lockScroll();
+      try {
+        video.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
       const p = video.play();
-      if (p && typeof p.then === "function") {
-        p.then(() => video.pause()).catch(() => {
-          /* autoplay may be blocked — seeking still works */
-        });
-      } else {
-        video.pause();
+      if (p && typeof p.catch === "function") {
+        p.catch(() => goToNext()); // if playback is blocked, don't trap the user
       }
+      const ms = ((video.duration || 10) + 2) * 1000;
+      safetyTimer = window.setTimeout(goToNext, ms);
     };
 
-    const onLoaded = () => {
-      setDuration();
-      prime();
-    };
-
-    video.addEventListener("loadedmetadata", onLoaded);
-    video.addEventListener("loadeddata", onLoaded);
-    if (video.readyState >= 1) onLoaded();
-
-    const clamp = (n: number, min: number, max: number) =>
-      Math.min(Math.max(n, min), max);
-
-    const getProgress = () => {
-      const rect = section.getBoundingClientRect();
-      const total = section.offsetHeight - window.innerHeight;
-      const scrolled = clamp(-rect.top, 0, Math.max(total, 1));
-      return total > 0 ? scrolled / total : 0;
-    };
-
-    const tick = () => {
-      const progress = getProgress();
-      const target = progress * duration;
-
-      smoothed += (target - smoothed) * 0.12;
-      if (Math.abs(target - smoothed) < 0.004) smoothed = target;
-
-      if (!video.seeking && Math.abs(video.currentTime - smoothed) > 0.01) {
-        try {
-          video.currentTime = smoothed;
-        } catch {
-          /* not seekable yet — next frame retries */
+    const onWheel = (e: WheelEvent) => {
+      if (phaseRef.current === "done") return;
+      if (phaseRef.current === "idle") {
+        if (e.deltaY > 0) {
+          e.preventDefault();
+          startPlay();
         }
+      } else {
+        e.preventDefault(); // playing → block all scroll
       }
-
-      // Headline fades out as you scrub in.
-      if (overlayRef.current) {
-        overlayRef.current.style.opacity = String(clamp(1 - progress * 2.2, 0, 1));
-      }
-      // Scroll hint fades quickly.
-      if (hintRef.current) {
-        hintRef.current.style.opacity = String(clamp(1 - progress * 6, 0, 1));
-      }
-      // Fade to black near the end so the video flows into the next section.
-      if (exitRef.current) {
-        exitRef.current.style.opacity = String(
-          clamp((progress - 0.82) / 0.18, 0, 1)
-        );
-      }
-
-      raf = requestAnimationFrame(tick);
     };
 
-    raf = requestAnimationFrame(tick);
+    const onTouchMove = (e: TouchEvent) => {
+      if (phaseRef.current === "done") return;
+      e.preventDefault();
+      if (phaseRef.current === "idle") startPlay();
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (phaseRef.current === "done") return;
+      const keys = ["ArrowDown", "PageDown", "End", " ", "Spacebar"];
+      if (keys.includes(e.key)) {
+        e.preventDefault();
+        if (phaseRef.current === "idle") startPlay();
+      }
+    };
+
+    const onTimeUpdate = () => {
+      if (!progressRef.current) return;
+      const d = video.duration || 1;
+      progressRef.current.style.transform = `scaleX(${video.currentTime / d})`;
+    };
+
+    // --- Arm, unless the user isn't at the top (e.g. refreshed mid-page),
+    // which would unfairly trap them. The intro runs for everyone otherwise
+    // because it's triggered by the user's own scroll action. ---
+    if (window.scrollY > 10) {
+      setPhaseBoth("done");
+      return () => {
+        unlockScroll();
+      };
+    }
+
+    // Lock immediately so the page can't be scrolled past the intro until
+    // it has played (the first wheel/touch/key still triggers playback).
+    lockScroll();
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("keydown", onKey, { passive: false });
+    video.addEventListener("ended", goToNext);
+    video.addEventListener("timeupdate", onTimeUpdate);
 
     return () => {
-      cancelAnimationFrame(raf);
-      video.removeEventListener("loadedmetadata", onLoaded);
-      video.removeEventListener("loadeddata", onLoaded);
+      removeBlockers();
+      unlockScroll();
+      window.clearTimeout(safetyTimer);
+      video.removeEventListener("ended", goToNext);
+      video.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, []);
+
+  const ctaClick = () => disarmRef.current();
 
   return (
     <section
       ref={sectionRef}
       aria-label="LAIR cinematic intro"
-      style={{ height: `${SCROLL_VH}vh` }}
-      className="relative w-full"
+      className="relative h-screen w-full"
     >
-      <div className="sticky top-0 h-screen w-full overflow-hidden bg-black">
+      <div className="absolute inset-0 h-full w-full overflow-hidden bg-black">
         <video
           ref={videoRef}
           className="absolute inset-0 h-full w-full object-cover"
@@ -142,20 +175,13 @@ export default function ScrollVideoHero() {
           tabIndex={-1}
         />
 
-        {/* Cinematic gradient so text stays readable over the footage */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/60 via-black/10 to-black/80" />
+        {/* Cinematic gradient for text legibility */}
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/55 via-black/10 to-black/80" />
 
-        {/* Fade-to-black at the end of the scrub → flows into next section */}
+        {/* Headline overlay — visible while idle, fades once playing */}
         <div
-          ref={exitRef}
-          style={{ opacity: 0 }}
-          className="pointer-events-none absolute inset-0 bg-black"
-        />
-
-        {/* Headline overlay — fades out as you scrub forward */}
-        <div
-          ref={overlayRef}
-          className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center"
+          className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center transition-opacity duration-700"
+          style={{ opacity: phase === "idle" ? 1 : 0 }}
         >
           <p className="mb-5 text-xs font-medium uppercase tracking-[0.45em] text-white/60">
             Your private command center
@@ -172,12 +198,14 @@ export default function ScrollVideoHero() {
           <div className="mt-10 flex flex-col gap-3 sm:flex-row">
             <a
               href="#membership"
+              onClick={ctaClick}
               className="rounded-full bg-white px-7 py-3 text-sm font-semibold text-black transition-transform hover:scale-[1.03]"
             >
               Enter LAIR
             </a>
             <a
               href="#waitlist"
+              onClick={ctaClick}
               className="rounded-full border border-white/25 bg-white/5 px-7 py-3 text-sm font-semibold text-white backdrop-blur transition-colors hover:bg-white/10"
             >
               Join Early Access
@@ -185,17 +213,44 @@ export default function ScrollVideoHero() {
           </div>
         </div>
 
-        {/* Scroll hint */}
+        {/* Scroll hint — only while idle */}
         <div
-          ref={hintRef}
-          className="absolute bottom-8 left-1/2 -translate-x-1/2 text-center"
+          className="absolute bottom-8 left-1/2 -translate-x-1/2 text-center transition-opacity duration-500"
+          style={{ opacity: phase === "idle" ? 1 : 0 }}
         >
           <p className="text-[11px] uppercase tracking-[0.35em] text-white/50">
-            Scroll to enter
+            Scroll to begin
           </p>
           <div className="mx-auto mt-3 h-9 w-5 rounded-full border border-white/30 p-1">
             <div className="mx-auto h-2 w-1 motion-safe:animate-bounce rounded-full bg-white/60" />
           </div>
+        </div>
+
+        {/* Skip control — only while playing */}
+        <button
+          onClick={() => {
+            disarmRef.current();
+            window.scrollTo({ top: window.innerHeight, behavior: "smooth" });
+          }}
+          className="absolute bottom-6 right-6 z-10 rounded-full border border-white/20 bg-black/40 px-4 py-2 text-xs font-medium text-white/80 backdrop-blur transition-opacity duration-300 hover:text-white"
+          style={{
+            opacity: phase === "playing" ? 1 : 0,
+            pointerEvents: phase === "playing" ? "auto" : "none",
+          }}
+        >
+          Skip ↓
+        </button>
+
+        {/* Progress bar — fills as the intro plays */}
+        <div
+          className="absolute bottom-0 left-0 h-[3px] w-full bg-white/10 transition-opacity duration-300"
+          style={{ opacity: phase === "playing" ? 1 : 0 }}
+        >
+          <div
+            ref={progressRef}
+            className="h-full w-full origin-left bg-accent"
+            style={{ transform: "scaleX(0)" }}
+          />
         </div>
       </div>
     </section>
