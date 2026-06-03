@@ -36,7 +36,9 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  /* `clip` prevents horizontal scroll WITHOUT creating a scroll container,
+     which would break `position: sticky` on the video hero. */
+  overflow-x: clip;
 }
 
 /* Thin, dark scrollbar to match the cinematic feel */
